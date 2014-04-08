@@ -8,7 +8,6 @@ static char *scriptfile     = "~/.surf/script.js";
 static Bool kioskmode       = FALSE; /* Ignore shortcuts */
 static Bool showindicators  = TRUE;  /* Show indicators in window title */
 static Bool zoomto96dpi     = TRUE;  /* Zoom pages to always emulate 96dpi */
-static Bool runinfullscreen = FALSE; /* Run in fullscreen mode by default */
 
 static guint defaultfontsize = 12;   /* Default font size */
 static gfloat zoomlevel = 1.0;       /* Default zoom level */
@@ -22,14 +21,11 @@ static char *strictssl      = FALSE; /* Refuse untrusted SSL connections */
 static time_t sessiontime   = 3600;
 
 /* Webkit default features */
-static Bool enablescrollbars = TRUE;
-static Bool enablespatialbrowsing = TRUE;
 static Bool enableplugins = TRUE;
 static Bool enablescripts = TRUE;
 static Bool enableinspector = TRUE;
 static Bool loadimages = TRUE;
 static Bool hidebackground  = FALSE;
-static Bool allowgeolocation = TRUE;
 
 #define SETPROP(p, q) { \
 	.v = (char *[]){ "/bin/sh", "-c", \
@@ -81,7 +77,6 @@ static Key keys[] = {
     { MODKEY,               GDK_i,      scroll_h,   { .i = +1 } },
     { MODKEY,               GDK_u,      scroll_h,   { .i = -1 } },
 
-    { 0,                    GDK_F11,    fullscreen, { 0 } },
     { 0,                    GDK_Escape, stop,       { 0 } },
     { MODKEY,               GDK_o,      source,     { 0 } },
     { MODKEY|GDK_SHIFT_MASK,GDK_o,      inspector,  { 0 } },
@@ -99,7 +94,5 @@ static Key keys[] = {
     { MODKEY|GDK_SHIFT_MASK,GDK_v,      toggle,     { .v = "enable-plugins" } },
     { MODKEY|GDK_SHIFT_MASK,GDK_a,      togglecookiepolicy, { 0 } },
     { MODKEY|GDK_SHIFT_MASK,GDK_m,      togglestyle, { 0 } },
-    { MODKEY|GDK_SHIFT_MASK,GDK_b,      togglescrollbars, { 0 } },
-    { MODKEY|GDK_SHIFT_MASK,GDK_g,      togglegeolocation, { 0 } },
 };
 

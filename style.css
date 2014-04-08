@@ -1,0 +1,22 @@
+._surf_label {
+	color: black;
+	font-size: 10px;
+	font-weight: normal;
+	background-color: #39FFAF;
+	margin: 0;
+	padding: 0;
+	position: absolute;
+	z-index: 99;
+}
+._surf_highlight {
+	background-color: #E3FF38;
+	font-size: 15px;
+	position: absolute;
+}
+
+.body_container {
+	background-color: #151515;
+}
+#chapter_container {
+	text-align: left;
+}

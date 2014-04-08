@@ -17,6 +17,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <webkit/webkit.h>
 #include <glib/gstdio.h>
 #include <JavaScriptCore/JavaScript.h>
@@ -50,7 +51,7 @@ typedef struct Client {
 	const char *needle;
 	gint progress;
 	struct Client *next;
-	gboolean zoomed, fullscreen, isinspecting, sslfailed;
+	gboolean zoomed, isinspecting, sslfailed;
 } Client;
 
 typedef struct {
@@ -71,6 +72,11 @@ typedef struct {
 
 G_DEFINE_TYPE(CookieJar, cookiejar, SOUP_TYPE_COOKIE_JAR_TEXT)
 
+typedef struct {
+	char token;
+	char *uri;
+} SearchEngine;
+
 static Display *dpy;
 static Atom atoms[AtomLast];
 static Client *clients = NULL;
@@ -81,7 +87,6 @@ static gboolean usingproxy = 0;
 static char togglestat[8];
 static char pagestat[3];
 static GTlsDatabase *tlsdb;
-static int policysel = 0;
 
 static void addaccelgroup(Client *c);
 static void beforerequest(WebKitWebView *w, WebKitWebFrame *f,
@@ -97,12 +102,9 @@ static void clipboard(Client *c, const Arg *arg);
 static void cookiejar_changed(SoupCookieJar *self, SoupCookie *old_cookie,
 		SoupCookie *new_cookie);
 static void cookiejar_finalize(GObject *self);
-static SoupCookieJarAcceptPolicy cookiepolicy_get(void);
-static SoupCookieJar *cookiejar_new(const char *filename, gboolean read_only,
-		SoupCookieJarAcceptPolicy policy);
+static SoupCookieJar *cookiejar_new(const char *filename, gboolean read_only);
 static void cookiejar_set_property(GObject *self, guint prop_id,
 		const GValue *value, GParamSpec *pspec);
-static char cookiepolicy_set(const SoupCookieJarAcceptPolicy p);
 
 static char *copystr(char **str, const char *src);
 static WebKitWebView *createwindow(WebKitWebView *v, WebKitWebFrame *f,
@@ -120,7 +122,6 @@ static void destroywin(GtkWidget* w, Client *c);
 static void die(const char *errstr, ...);
 static void eval(Client *c, const Arg *arg);
 static void find(Client *c, const Arg *arg);
-static void fullscreen(Client *c, const Arg *arg);
 static void geopolicyrequested(WebKitWebView *v, WebKitWebFrame *f,
 		WebKitGeolocationPolicyDecision *d, Client *c);
 static const char *getatom(Client *c, int a);
@@ -144,9 +145,11 @@ static void linkhover(WebKitWebView *v, const char* t, const char* l,
 static void loadstatuschange(WebKitWebView *view, GParamSpec *pspec,
 		Client *c);
 static void loaduri(Client *c, const Arg *arg);
-static void navigate(Client *c, const Arg *arg);
 static Client *newclient(void);
 static void newwindow(Client *c, const Arg *arg, gboolean noembed);
+static const gchar *parseuri(const gchar *uri, char **parsed_uri);
+static char **parse_address(const char *url);
+static char **parse_url(char *str);
 static void pasteuri(GtkClipboard *clipboard, const char *text, gpointer d);
 static gboolean contextmenu(WebKitWebView *view, GtkWidget *menu,
 		WebKitHitTestResult *target, gboolean keyboard, Client *c);
@@ -156,9 +159,6 @@ static GdkFilterReturn processx(GdkXEvent *xevent, GdkEvent *event,
 		gpointer d);
 static void progresschange(WebKitWebView *view, GParamSpec *pspec, Client *c);
 static void reload(Client *c, const Arg *arg);
-static void scroll_h(Client *c, const Arg *arg);
-static void scroll_v(Client *c, const Arg *arg);
-static void scroll(GtkAdjustment *a, const Arg *arg);
 static void setatom(Client *c, int a, const char *v);
 static void setup(void);
 static void sigchld(int unused);
@@ -167,12 +167,10 @@ static void spawn(Client *c, const Arg *arg);
 static void stop(Client *c, const Arg *arg);
 static void titlechange(WebKitWebView *view, GParamSpec *pspec, Client *c);
 static void toggle(Client *c, const Arg *arg);
-static void togglecookiepolicy(Client *c, const Arg *arg);
-static void togglegeolocation(Client *c, const Arg *arg);
-static void togglescrollbars(Client *c, const Arg *arg);
 static void togglestyle(Client *c, const Arg *arg);
 static void updatetitle(Client *c);
 static void updatewinid(Client *c);
+static int url_has_domain(char *url, char **parsed_uri);
 static void usage(void);
 static void windowobjectcleared(GtkWidget *w, WebKitWebFrame *frame,
 		JSContextRef js, JSObjectRef win, Client *c);
@@ -263,6 +261,7 @@ cleanup(void) {
 	while(clients)
 		destroyclient(clients);
 	g_free(cookiefile);
+	g_free(historyfile);
 	g_free(scriptfile);
 	g_free(stylefile);
 }
@@ -302,12 +301,12 @@ cookiejar_init(CookieJar *self) {
 }
 
 static SoupCookieJar *
-cookiejar_new(const char *filename, gboolean read_only,
-		SoupCookieJarAcceptPolicy policy) {
+cookiejar_new(const char *filename, gboolean read_only) {
 	return g_object_new(COOKIEJAR_TYPE,
-	                    SOUP_COOKIE_JAR_TEXT_FILENAME, filename,
-	                    SOUP_COOKIE_JAR_READ_ONLY, read_only,
-			    SOUP_COOKIE_JAR_ACCEPT_POLICY, policy, NULL);
+			SOUP_COOKIE_JAR_TEXT_FILENAME, filename,
+			SOUP_COOKIE_JAR_READ_ONLY, read_only,
+			SOUP_COOKIE_JAR_ACCEPT_POLICY, SOUP_COOKIE_JAR_ACCEPT_NO_THIRD_PARTY,
+			NULL);
 }
 
 static void
@@ -317,36 +316,6 @@ cookiejar_set_property(GObject *self, guint prop_id, const GValue *value,
 	G_OBJECT_CLASS(cookiejar_parent_class)->set_property(self, prop_id,
 			value, pspec);
 	flock(COOKIEJAR(self)->lock, LOCK_UN);
-}
-
-static SoupCookieJarAcceptPolicy
-cookiepolicy_get(void) {
-	switch(cookiepolicies[policysel]) {
-	case 'a':
-		return SOUP_COOKIE_JAR_ACCEPT_NEVER;
-	case '@':
-		return SOUP_COOKIE_JAR_ACCEPT_NO_THIRD_PARTY;
-	case 'A':
-	default:
-		break;
-	}
-
-	return SOUP_COOKIE_JAR_ACCEPT_ALWAYS;
-}
-
-static char
-cookiepolicy_set(const SoupCookieJarAcceptPolicy ep) {
-	switch(ep) {
-	case SOUP_COOKIE_JAR_ACCEPT_NEVER:
-		return 'a';
-	case SOUP_COOKIE_JAR_ACCEPT_NO_THIRD_PARTY:
-		return '@';
-	case SOUP_COOKIE_JAR_ACCEPT_ALWAYS:
-	default:
-		break;
-	}
-
-	return 'A';
 }
 
 static void
@@ -484,23 +453,9 @@ find(Client *c, const Arg *arg) {
 }
 
 static void
-fullscreen(Client *c, const Arg *arg) {
-	if(c->fullscreen) {
-		gtk_window_unfullscreen(GTK_WINDOW(c->win));
-	} else {
-		gtk_window_fullscreen(GTK_WINDOW(c->win));
-	}
-	c->fullscreen = !c->fullscreen;
-}
-
-static void
 geopolicyrequested(WebKitWebView *v, WebKitWebFrame *f,
 		WebKitGeolocationPolicyDecision *d, Client *c) {
-	if(allowgeolocation) {
-		webkit_geolocation_policy_allow(d);
-	} else {
-		webkit_geolocation_policy_deny(d);
-	}
+	webkit_geolocation_policy_deny(d);
 }
 
 static const char *
@@ -656,43 +611,240 @@ loadstatuschange(WebKitWebView *view, GParamSpec *pspec, Client *c) {
 
 static void
 loaduri(Client *c, const Arg *arg) {
-	char *u = NULL, *rp;
-	const char *uri = (char *)arg->v;
+	const gchar *u;
+	char *rp, *pt;
+	const gchar *uri = arg->v;
+	char **parsed_uri;
+	char *home;
+	char *path;
+	int i;
+	FILE *f;
 	Arg a = { .b = FALSE };
-	struct stat st;
 
-	if(strcmp(uri, "") == 0)
+	if (*uri == '\0')
 		return;
 
+	pt=malloc(strlen(uri)+1);
+	pt=strdup((char *)uri);
+	parsed_uri = parse_url(pt);
+
 	/* In case it's a file path. */
-	if(stat(uri, &st) == 0) {
-		rp = realpath(uri, NULL);
+	if(strncmp(parsed_uri[0], "file://", 6) == 0 ||
+		(strlen(parsed_uri[0]) == 0 && strlen(parsed_uri[1]) == 0)) {
+		path=malloc(strlen(parsed_uri[1]) +
+		            strlen(parsed_uri[2]) +
+		            strlen(parsed_uri[3]) + 1);
+		path=strcpy(path, parsed_uri[1]);
+		path=strcat(path, parsed_uri[2]);
+		path=strcat(path, parsed_uri[3]);
+
+		if (path[0] == '~') {
+		    home = getenv("HOME");
+		    home = realloc(home, strlen(path)+strlen(home));
+		    home = strcat(home, path+1);
+		    free(path);
+		    path = home;
+		}
+		rp = realpath(path, NULL);
+
 		u = g_strdup_printf("file://%s", rp);
+		free(path);
 		free(rp);
 	} else {
-		u = g_strrstr(uri, "://") ? g_strdup(uri)
-			: g_strdup_printf("http://%s", uri);
+		u = parseuri(pt, parsed_uri);
 	}
 
 	setatom(c, AtomUri, uri);
+
+	free(pt);
+	for (i = 0; i < 4; i++)
+		free(parsed_uri[i]);
+	free(parsed_uri);
 
 	/* prevents endless loop */
 	if(strcmp(u, geturi(c)) == 0) {
 		reload(c, &a);
 	} else {
 		webkit_web_view_load_uri(c->view, u);
+		f = fopen(historyfile, "a+");
+		fprintf(f, "%s", u);
+		fclose(f);
 		c->progress = 0;
 		c->title = copystr(&c->title, u);
 		updatetitle(c);
 	}
-	g_free(u);
+	g_free((gpointer) u);
 }
 
-static void
-navigate(Client *c, const Arg *arg) {
-	int steps = *(int *)arg;
-	webkit_web_view_go_back_or_forward(c->view, steps);
+#define SCHEME_CHAR(ch) (isalnum (ch) || (ch) == '-' || (ch) == '+')
+
+/*
+ * This function takes an url and chop it into three part: sheme, domain, the
+ * rest, e.g. http://www.google.co.uk/search?q=hello will produce a triple
+ * ('http://', 'www.google.co.uk', '/search?q=hello')
+ */
+static char **
+parse_url(char *str) {
+	/* Return the position of ':' - last element of a scheme, or 0 if there
+	 * is no scheme. */
+	char *sch="";
+	char *pt;
+	char **ret;
+	char **dret;
+	int k,i = 0;
+
+	pt=malloc(strlen(str)+1);
+	pt=strcpy(pt, str);
+
+	while (*pt == ' ')
+		pt+=1;
+	ret=malloc(4*sizeof(char *));
+
+	/* The first char must be a scheme char. */
+	if (!*pt || !SCHEME_CHAR (*pt)) {
+		ret[0]=malloc(1);
+		ret[0][0]='\0';
+		dret=parse_address(pt);
+		for (k=0;k<3;k++)
+			ret[k+1]=dret[k];
+		return ret;
+	}
+	++i;
+	/* Followed by 0 or more scheme chars. */
+	while (pt[i] && SCHEME_CHAR(pt[i])) {
+		++i;
+	}
+	sch=malloc(i+4);
+	sch=strncpy(sch, pt, i);
+	sch[i]='\0';
+	if (strlen(sch)) {
+		sch=strcat(sch, "://");
+	}
+
+	/* Terminated by "://". */
+	if (strncmp(sch, pt, strlen(sch)) == 0) {
+		ret[0]=sch;
+		/* dret=malloc(strlen(str)); */
+		dret=parse_address(pt+i+3);
+		for (k=0;k<3;k++)
+			ret[k+1]=dret[k];
+		return ret;
+	}
+	ret[0]=malloc(1);
+	ret[0][0]='\0';
+	dret=parse_address(str);
+	for (k=0;k<3;k++)
+		ret[k+1]=dret[k];
+	return ret;
 }
+
+#define DOMAIN_CHAR(ch) (isalnum (ch) || (ch) == '-' || (ch) == '.')
+
+/*
+ * This function takes an url without a scheme and outputs a pair: domain and
+ * the rest.
+ */
+	static char **
+parse_address(const char *url)
+{
+	int n;
+	size_t i=0;
+	size_t u=strlen(url);
+	char *domain;
+	char *port;
+	char **res=malloc(3*sizeof (char *));
+
+	if (isalnum(*url)) {
+		++i;
+		while (*(url+i) && DOMAIN_CHAR (*(url+i)))
+			++i;
+	}
+	domain=malloc(i+1);
+	domain=strncpy(domain, url, i);
+	domain[i]='\0';
+
+	// check for a port number
+	if ( (u > i) && *(url+i) == ':' )
+	{
+		n=i+1;
+		while ( (n<=u) && (n<i+1+5) && isdigit(*(url+n)) )
+			n++;
+		if (n>i+1)
+		{
+			port=malloc(n-i+1);
+			port=strncpy(port, (url+i), n-i);
+			port[n-i+1]='\0';
+		}
+		else
+		{
+			port=malloc(1);
+			port[0]='\0';
+		}
+	}
+	else
+	{
+		n=i;
+		port=malloc(1);
+		port[0] = '\0';
+	}
+
+
+	res[0]=domain;
+	res[1]=port;
+	res[2]=malloc(strlen(url+n)+1);
+	res[2]=strcpy(res[2], (url+n));
+	return res;
+}
+
+/*
+ * This function tests if the url has a qualified domain name.
+ */
+static int
+url_has_domain(char *url, char **parsed_uri) {
+	char *domain=parsed_uri[1];
+	char *rest=parsed_uri[3];
+
+	if (strstr(domain, " ") != NULL)
+		return false;
+
+	if (! *domain ||
+			(*rest && rest[0] != '/'))
+		return false;
+
+	// the domain name should contain at least one '.',
+	// unless it is "localhost"
+	if (strcmp(domain, "localhost") == 0)
+		return true;
+
+	if (strstr(domain, ".") != NULL)
+		return true;
+
+	return false;
+}
+
+static const gchar *
+parseuri(const gchar *uri, char **parsed_uri) {
+	guint i;
+	gchar *pt;
+
+	for (pt = g_strdup(uri); *pt == ' '; ++pt);
+
+	if (url_has_domain((char *) pt, parsed_uri)) {
+		return g_strrstr(pt, "://") ? g_strdup(pt)
+		     : g_strdup_printf("http://%s", pt);
+	}
+
+	for (i = 0; i < LENGTH(searchengines); i++) {
+		if (*pt != searchengines[i].token)
+			continue;
+		if (pt[1] == ' ')
+			return g_strdup_printf(searchengines[i].uri, pt+2);
+		if (pt[1] == '\0')
+		    return g_strdup_printf(searchengines[i].uri, "");
+	}
+	return g_strdup_printf(searchengines[0].uri, pt);
+}
+
 
 static Client *
 newclient(void) {
@@ -735,8 +887,7 @@ newclient(void) {
 			"destroy",
 			G_CALLBACK(destroywin), c);
 
-	if(!kioskmode)
-		addaccelgroup(c);
+	addaccelgroup(c);
 
 	/* Pane */
 	c->pane = gtk_vpaned_new();
@@ -798,13 +949,8 @@ newclient(void) {
 	g_signal_connect(G_OBJECT(frame), "scrollbars-policy-changed",
 			G_CALLBACK(gtk_true), NULL);
 
-	if(!enablescrollbars) {
-		gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(c->scroll),
-				GTK_POLICY_NEVER, GTK_POLICY_NEVER);
-	} else {
-		gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(c->scroll),
-				GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-	}
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(c->scroll),
+			GTK_POLICY_NEVER, GTK_POLICY_NEVER);
 
 	/* Arranging */
 	gtk_container_add(GTK_CONTAINER(c->scroll), GTK_WIDGET(c->view));
@@ -840,12 +986,8 @@ newclient(void) {
 			NULL);
 	g_object_set(G_OBJECT(settings), "enable-scripts", enablescripts,
 			NULL);
-	g_object_set(G_OBJECT(settings), "enable-spatial-navigation",
-			enablespatialbrowsing, NULL);
 	g_object_set(G_OBJECT(settings), "enable-developer-extras",
 			enableinspector, NULL);
-	g_object_set(G_OBJECT(settings), "enable-default-context-menu",
-			kioskmode ^ 1, NULL);
 	g_object_set(G_OBJECT(settings), "default-font-size",
 			defaultfontsize, NULL);
 	g_object_set(G_OBJECT(settings), "resizable-text-areas",
@@ -883,11 +1025,6 @@ newclient(void) {
 		c->isinspecting = false;
 	}
 
-	if(runinfullscreen) {
-		c->fullscreen = 0;
-		fullscreen(c, NULL);
-	}
-
 	g_free(uri);
 
 	setatom(c, AtomFind, "");
@@ -919,10 +1056,6 @@ newwindow(Client *c, const Arg *arg, gboolean noembed) {
 	char tmp[64];
 
 	cmd[i++] = argv0;
-	cmd[i++] = "-a";
-	cmd[i++] = cookiepolicies;
-	if(!enablescrollbars)
-		cmd[i++] = "-b";
 	if(embed && !noembed) {
 		cmd[i++] = "-e";
 		snprintf(tmp, LENGTH(tmp), "%u\n", (int)embed);
@@ -930,8 +1063,6 @@ newwindow(Client *c, const Arg *arg, gboolean noembed) {
 	}
 	if(!loadimages)
 		cmd[i++] = "-i";
-	if(kioskmode)
-		cmd[i++] = "-k";
 	if(!enableplugins)
 		cmd[i++] = "-p";
 	if(!enablescripts)
@@ -1043,41 +1174,6 @@ reload(Client *c, const Arg *arg) {
 }
 
 static void
-scroll_h(Client *c, const Arg *arg) {
-	scroll(gtk_scrolled_window_get_hadjustment(
-				GTK_SCROLLED_WINDOW(c->scroll)), arg);
-}
-
-static void
-scroll_v(Client *c, const Arg *arg) {
-	scroll(gtk_scrolled_window_get_vadjustment(
-				GTK_SCROLLED_WINDOW(c->scroll)), arg);
-}
-
-static void
-scroll(GtkAdjustment *a, const Arg *arg) {
-	gdouble v;
-
-	v = gtk_adjustment_get_value(a);
-	switch(arg->i) {
-	case +10000:
-	case -10000:
-		v += gtk_adjustment_get_page_increment(a) *
-			(arg->i / 10000);
-		break;
-	case +20000:
-	case -20000:
-	default:
-		v += gtk_adjustment_get_step_increment(a) * arg->i;
-	}
-
-	v = MAX(v, 0.0);
-	v = MIN(v, gtk_adjustment_get_upper(a) -
-			gtk_adjustment_get_page_size(a));
-	gtk_adjustment_set_value(a, v);
-}
-
-static void
 setatom(Client *c, int a, const char *v) {
 	XSync(dpy, False);
 	XChangeProperty(dpy, GDK_WINDOW_XID(GTK_WIDGET(c->win)->window),
@@ -1106,6 +1202,7 @@ setup(void) {
 
 	/* dirs and files */
 	cookiefile = buildpath(cookiefile);
+	historyfile = buildpath(historyfile);
 	scriptfile = buildpath(scriptfile);
 	stylefile = buildpath(stylefile);
 
@@ -1114,8 +1211,7 @@ setup(void) {
 
 	/* cookie jar */
 	soup_session_add_feature(s,
-			SOUP_SESSION_FEATURE(cookiejar_new(cookiefile, FALSE,
-					cookiepolicy_get())));
+			SOUP_SESSION_FEATURE(cookiejar_new(cookiefile, FALSE)));
 
 	/* ssl */
 	tlsdb = g_tls_file_database_new(cafile, &error);
@@ -1205,75 +1301,6 @@ toggle(Client *c, const Arg *arg) {
 }
 
 static void
-togglecookiepolicy(Client *c, const Arg *arg) {
-	SoupCookieJar *jar;
-	SoupCookieJarAcceptPolicy policy;
-
-	jar = SOUP_COOKIE_JAR(
-			soup_session_get_feature(
-				webkit_get_default_session(),
-				SOUP_TYPE_COOKIE_JAR));
-	g_object_get(G_OBJECT(jar), "accept-policy", &policy, NULL);
-
-	policysel++;
-	if(policysel >= strlen(cookiepolicies))
-		policysel = 0;
-
-	g_object_set(G_OBJECT(jar), "accept-policy",
-			cookiepolicy_get(), NULL);
-
-	updatetitle(c);
-	/* Do not reload. */
-}
-
-static void
-togglegeolocation(Client *c, const Arg *arg) {
-	Arg a = { .b = FALSE };
-
-	allowgeolocation ^= 1;
-
-	reload(c, &a);
-}
-
-static void
-twitch(Client *c, const Arg *arg) {
-	GtkAdjustment *a;
-	gdouble v;
-
-	a = gtk_scrolled_window_get_vadjustment(
-			GTK_SCROLLED_WINDOW(c->scroll));
-
-	v = gtk_adjustment_get_value(a);
-
-	v += arg->i;
-
-	v = MAX(v, 0.0);
-	v = MIN(v, gtk_adjustment_get_upper(a) -
-			gtk_adjustment_get_page_size(a));
-	gtk_adjustment_set_value(a, v);
-}
-
-static void
-togglescrollbars(Client *c, const Arg *arg) {
-	GtkPolicyType vspolicy;
-	Arg a;
-
-	gtk_scrolled_window_get_policy(GTK_SCROLLED_WINDOW(c->scroll), NULL, &vspolicy);
-
-	if(vspolicy == GTK_POLICY_AUTOMATIC) {
-		gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(c->scroll),
-				GTK_POLICY_NEVER, GTK_POLICY_NEVER);
-	} else {
-		gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(c->scroll),
-				GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-		a.i = +1;
-		twitch(c, &a);
-		a.i = -1;
-		twitch(c, &a);
-	}
-}
-
-static void
 togglestyle(Client *c, const Arg *arg) {
 	WebKitWebSettings *settings;
 	char *uri;
@@ -1293,13 +1320,9 @@ gettogglestat(Client *c){
 	int p = 0;
 	WebKitWebSettings *settings = webkit_web_view_get_settings(c->view);
 
-	togglestat[p++] = cookiepolicy_set(cookiepolicy_get());
-
 	g_object_get(G_OBJECT(settings), "enable-caret-browsing",
 			&value, NULL);
 	togglestat[p++] = value? 'C': 'c';
-
-	togglestat[p++] = allowgeolocation? 'G': 'g';
 
 	g_object_get(G_OBJECT(settings), "auto-load-images", &value, NULL);
 	togglestat[p++] = value? 'I': 'i';
@@ -1368,7 +1391,6 @@ updatewinid(Client *c) {
 static void
 usage(void) {
 	die("usage: %s [-bBfFgGiIkKnNpPsSvx]"
-		" [-a cookiepolicies ] "
 		" [-c cookiefile] [-e xid] [-r scriptfile]"
 		" [-t stylefile] [-u useragent] [-z zoomlevel]"
 		" [uri]\n", basename(argv0));
@@ -1405,44 +1427,17 @@ main(int argc, char *argv[]) {
 
 	/* command line args */
 	ARGBEGIN {
-	case 'a':
-		cookiepolicies = EARGF(usage());
-		break;
-	case 'b':
-		enablescrollbars = 0;
-		break;
-	case 'B':
-		enablescrollbars = 1;
-		break;
 	case 'c':
 		cookiefile = EARGF(usage());
 		break;
 	case 'e':
 		embed = strtol(EARGF(usage()), NULL, 0);
 		break;
-	case 'f':
-		runinfullscreen = 1;
-		break;
-	case 'F':
-		runinfullscreen = 0;
-		break;
-	case 'g':
-		allowgeolocation = 0;
-		break;
-	case 'G':
-		allowgeolocation = 1;
-		break;
 	case 'i':
 		loadimages = 0;
 		break;
 	case 'I':
 		loadimages = 1;
-		break;
-	case 'k':
-		kioskmode = 0;
-		break;
-	case 'K':
-		kioskmode = 1;
 		break;
 	case 'n':
 		enableinspector = 0;
